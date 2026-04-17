@@ -52,6 +52,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: workspace-artifact
+          path: .
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
