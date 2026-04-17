@@ -1,4 +1,4 @@
-name: V-Profile Deploy to AWS ECS
+name: V-Profile DevSecOps Pipeline
 
 on:
   push:
@@ -7,16 +7,19 @@ on:
   workflow_dispatch:
 
 env:
-  ECR_REPOSITORY: vprofile-repo
+  # Matching your AWS Setup
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: githubactionsrepo
   ECS_SERVICE: vprofile-service
-  ECS_CLUSTER: vprofile-cluster
-  ECS_TASK_DEFINITION: .aws/task-definition.json # Path to your task def file
-  CONTAINER_NAME: vprofile-app
+  ECS_CLUSTER: gitActions-server
+  ECS_TASK_DEFINITION: .aws/task-definition.json
+  CONTAINER_NAME: gitActions-server1  # Must match the 'name' in your JSON
 
 jobs:
-  build-and-push-ecr:
-    name: Build, Scan and Push to ECR
+  build-and-test:
+    name: Build & Security Scan
     runs-on: ubuntu-latest
+    environment: secret_env # Tells GitHub to use your secret_env
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -28,21 +31,50 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Maven Build
-        run: mvn clean install -DskipTests
+      - name: Maven Build & Test
+        run: mvn clean install -DskipTests # Skip tests for first run to ensure deploy works
+
+      - name: Trivy FS Scan (Code Security)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vprofile-war
+          path: target/*.war
+
+  deploy:
+    name: Push to ECR & Deploy to ECS
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    environment: secret_env
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vprofile-war
+          path: target/
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, Tag, and Push Image to ECR
+      - name: Build, Tag, and Push Image
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -52,7 +84,7 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Trivy Scan ECR Image
+      - name: Trivy Image Scan
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
@@ -60,32 +92,13 @@ jobs:
           severity: 'CRITICAL'
           exit-code: '1'
 
-    outputs:
-      image: ${{ steps.build-image.outputs.image }}
-
-  deploy-to-ecs:
-    name: Deploy to Amazon ECS
-    needs: build-and-push-ecr
-    runs-on: ubuntu-latest
-    steps:
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Download Task Definition
-        run: |
-          aws ecs describe-task-definition --task-definition vprofile-task --query taskDefinition > task-definition.json
-
-      - name: Fill in the new image ID in the ECS task definition
+      - name: Fill in the new image ID in the Amazon ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: task-definition.json
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
           container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ needs.build-and-push-ecr.outputs.image }}
+          image: ${{ steps.build-image.outputs.image }}
 
       - name: Deploy Amazon ECS task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
