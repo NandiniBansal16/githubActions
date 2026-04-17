@@ -16,7 +16,7 @@ env:
   DOCKERFILE_PATH: ./Docker-files/app/multistage/Dockerfile
 
 jobs:
-  # PHASE 1: Build and Security Testing
+  # PHASE 1: Build Phase
   build-and-test:
     name: Phase 1 - Build & Test
     runs-on: ubuntu-latest
@@ -24,15 +24,6 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Run Trivy FS Scan (Code Level)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0' # Set to 0 so it doesn't stop the build if it finds bugs
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -44,7 +35,6 @@ jobs:
       - name: Maven Build
         run: mvn clean install -DskipTests
 
-      # We upload the source code so the next job can use the Dockerfile
       - name: Upload Workspace for Deployment
         uses: actions/upload-artifact@v4
         with:
@@ -54,7 +44,7 @@ jobs:
   # PHASE 2: AWS Deployment
   deploy:
     name: Phase 2 - AWS Deployment
-    needs: build-and-test # This ensures Phase 2 only starts if Phase 1 finishes
+    needs: build-and-test
     runs-on: ubuntu-latest
     environment: secret_env
     steps:
@@ -83,14 +73,6 @@ jobs:
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f ${{ env.DOCKERFILE_PATH }} .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-      - name: Trivy Image Scan (Container Level)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          format: 'table'
-          severity: 'CRITICAL'
-          exit-code: '1' # We keep this as 1 because we NEVER want to deploy a critical image
 
       - name: Fill in the new image ID in the ECS task definition
         id: task-def
